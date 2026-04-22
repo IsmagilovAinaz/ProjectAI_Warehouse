@@ -1,0 +1,16 @@
+# Visual Studio
+.vs/
+*.VC.db
+*.ipch
+*.pch
+*.sdf
+*.suo
+
+# Unreal Engine
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+Build/
+*.generated.h
+*.gen.cpp
