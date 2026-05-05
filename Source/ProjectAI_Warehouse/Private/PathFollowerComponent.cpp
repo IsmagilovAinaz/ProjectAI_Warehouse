@@ -20,7 +20,6 @@ void UPathFollowerComponent::SetPath(const TArray<FVector>& Path)
     bFinished = (Waypoints.Num() == 0);
     bReleased = false;
 
-    // Логирование для диссертации (§3.4)
     if (Waypoints.Num() > 0)
     {
         UE_LOG(LogTemp, Log, TEXT("PathFollower: Agent %d received path with %d points"),
@@ -43,7 +42,6 @@ void UPathFollowerComponent::DrawDebugPath()
     UWorld* World = GetWorld();
     if (!World) return;
 
-    // Рисуем линии маршрута
     for (int32 i = 0; i < Waypoints.Num() - 1; i++)
     {
         FVector Start = Waypoints[i];
@@ -54,13 +52,9 @@ void UPathFollowerComponent::DrawDebugPath()
         FColor Color = (i == CurrentIndex) ? FColor::Yellow : FColor::Green;
         float Thickness = (i == CurrentIndex) ? 3.0f : 1.5f;
 
-        DrawDebugLine(
-            World, Start, End, Color,
-            false, DebugDrawDuration, 0, Thickness
-        );
+        DrawDebugLine(World, Start, End, Color, false, DebugDrawDuration, 0, Thickness);
     }
 
-    // Финальная точка
     FVector Last = Waypoints.Last();
     Last.Z += 15.0f;
     DrawDebugSphere(World, Last, 12.0f, 8, FColor::Blue, false, DebugDrawDuration);
@@ -83,7 +77,8 @@ void UPathFollowerComponent::TickComponent(float DeltaTime, ELevelTick TickType,
         if (bFinished && !bReleased)
         {
             bReleased = true;
-            // Освобождаем резервации пути
+
+            // Release path reservations
             UMAPFPlanner* Planner = UMAPFPlanner::GetPlanner(GetOwner());
             if (Planner)
             {
@@ -94,7 +89,10 @@ void UPathFollowerComponent::TickComponent(float DeltaTime, ELevelTick TickType,
                     GridPath.Add(Planner->WorldToGrid(P));
                 }
                 Planner->ReleasePath(AgentID, GridPath);
+
+                UE_LOG(LogTemp, Log, TEXT("PathFollower: Agent %d released path reservations"), AgentID);
             }
+
             OnPathFinished();
         }
         return;
@@ -106,7 +104,23 @@ void UPathFollowerComponent::TickComponent(float DeltaTime, ELevelTick TickType,
     UCharacterMovementComponent* CMC = Char->GetCharacterMovement();
     if (!CMC) return;
 
-    // 2D-движение: отключаем влияние гравитации
+    // Progressive release of passed waypoints
+    UMAPFPlanner* Planner = UMAPFPlanner::GetPlanner(GetOwner());
+    if (Planner && CurrentIndex > 0)
+    {
+        // Release previous waypoints that we've passed
+        static int32 LastReleasedIndex = 0;
+        while (LastReleasedIndex < CurrentIndex)
+        {
+            FIntVector GridPos = Planner->WorldToGrid(Waypoints[LastReleasedIndex]);
+            TArray<FIntVector> SinglePoint;
+            SinglePoint.Add(GridPos);
+            Planner->ReleasePath(AgentID, SinglePoint);
+            LastReleasedIndex++;
+        }
+    }
+
+    // 2D movement
     CMC->GravityScale = 0.f;
 
     FVector CurrentPos = GetOwner()->GetActorLocation();
@@ -116,7 +130,7 @@ void UPathFollowerComponent::TickComponent(float DeltaTime, ELevelTick TickType,
     FVector Dir = TargetPos - CurrentPos;
     float Dist = Dir.Size();
 
-    // Переключение на следующую точку
+    // Move to next waypoint if close enough
     if (Dist < ArrivalThreshold)
     {
         CurrentIndex++;
@@ -127,7 +141,7 @@ void UPathFollowerComponent::TickComponent(float DeltaTime, ELevelTick TickType,
             CMC->StopActiveMovement();
             return;
         }
-        // Мгновенное обновление цели
+
         TargetPos = Waypoints[CurrentIndex];
         CurrentPos = GetOwner()->GetActorLocation();
         CurrentPos.Z = TargetPos.Z;
@@ -135,12 +149,11 @@ void UPathFollowerComponent::TickComponent(float DeltaTime, ELevelTick TickType,
         Dist = Dir.Size();
     }
 
-    // Поворот и движение
+    // Rotation and movement
     if (Dist > 1.0f)
     {
         Dir.Normalize();
 
-        // Плавный поворот
         FRotator TargetRot = Dir.Rotation();
         TargetRot.Pitch = 0.f;
         TargetRot.Roll = 0.f;
@@ -153,7 +166,6 @@ void UPathFollowerComponent::TickComponent(float DeltaTime, ELevelTick TickType,
         );
         GetOwner()->SetActorRotation(NewRot);
 
-        // Прямое управление скоростью (исключает инерционные артефакты)
         CMC->Velocity = Dir * Speed;
     }
     else
@@ -161,7 +173,6 @@ void UPathFollowerComponent::TickComponent(float DeltaTime, ELevelTick TickType,
         CMC->Velocity = FVector::ZeroVector;
     }
 
-    // Обновление отладочной визуализации
     if (bDrawDebugPath)
     {
         DrawDebugPath();
@@ -170,6 +181,5 @@ void UPathFollowerComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 
 void UPathFollowerComponent::OnPathFinished()
 {
-    // Пустая реализация — можно переопределить в Blueprint
     UE_LOG(LogTemp, Verbose, TEXT("PathFollower: Agent %d completed path"), AgentID);
 }

@@ -13,7 +13,7 @@ public:
     UPathFollowerComponent();
 
     // === MAPF ===
-    UPROPERTY(EditAnywhere, Category = "MAPF")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPF")
     int32 AgentID = 0;
 
     // === ƒ¬»∆≈Õ»≈ ===

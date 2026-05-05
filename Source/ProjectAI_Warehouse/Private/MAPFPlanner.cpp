@@ -3,9 +3,10 @@
 #include "Algo/Reverse.h"
 #include "DrawDebugHelpers.h"
 #include "Kismet/KismetSystemLibrary.h"
+#include "Engine/World.h"
 
 // ============================================================================
-// ИНИЦИАЛИЗАЦИЯ СЕТКИ
+// INITIALIZATION
 // ============================================================================
 
 void UMAPFPlanner::InitializeGridCache()
@@ -22,7 +23,6 @@ void UMAPFPlanner::InitializeGridCache()
     int32 TotalCells = 0;
     int32 ObstacleCells = 0;
 
-    // Проходим по всей сетке склада
     for (int32 X = GridMinX; X <= GridMaxX; X++)
     {
         for (int32 Y = GridMinY; Y <= GridMaxY; Y++)
@@ -49,75 +49,57 @@ void UMAPFPlanner::InitializeGridCache()
 }
 
 // ============================================================================
-// ПРОВЕРКА ПРЕПЯТСТВИЙ
+// OBSTACLE CHECKING
 // ============================================================================
 
 bool UMAPFPlanner::CheckStaticObstacle(FVector Position) const
 {
     UWorld* World = GetWorld();
-    if (!World) return true; // Считаем непроходимым, если нет мира
+    if (!World) return true;
 
     if (!bUseLineTraceForObstacles)
     {
-        // Быстрая проверка: просто проверяем границы
         return false;
     }
 
-    // LineTrace вниз для обнаружения пола и стен
     FVector Start = Position;
-    Start.Z += 200.0f; // Начинаем высоко
-
+    Start.Z += 200.0f;
     FVector End = Position;
-    End.Z = -100.0f;   // Заканчиваем низко
+    End.Z = -100.0f;
 
     FHitResult Hit;
     FCollisionQueryParams QueryParams;
     QueryParams.bTraceComplex = false;
     QueryParams.bReturnPhysicalMaterial = false;
 
-    // Игнорируем самих роботов (Pawn)
-    QueryParams.AddIgnoredActor(nullptr);
-
-    // Трассируем через все статические объекты
     bool bHit = World->LineTraceSingleByChannel(
-        Hit,
-        Start,
-        End,
-        ECC_WorldStatic,
-        QueryParams
+        Hit, Start, End, ECC_WorldStatic, QueryParams
     );
 
     if (!bHit)
     {
-        // Если ничего не нашли - это пустота (не проходимо)
         return true;
     }
 
-    // Проверяем, что попали в пол, а не в стену
-    // Если hit произошел близко к нашей точке Z - это пол (проходимо)
-    // Если hit произошел высоко - это стена (не проходимо)
     float HitZ = Hit.Location.Z;
     float TargetZ = Position.Z;
 
-    // Если разница по Z больше 50 см - это вероятно стена
     if (FMath::Abs(HitZ - TargetZ) > 50.0f)
     {
-        return true; // Стена
+        return true;
     }
 
-    return false; // Пол - проходимо
+    return false;
 }
 
 bool UMAPFPlanner::IsCellPassable(FVector WorldPosition) const
 {
-    // 1. Проверяем границы сетки
     FIntVector GridPos = WorldToGrid(WorldPosition);
     if (!IsWithinGridBounds(GridPos))
     {
         return false;
     }
 
-    // 2. Проверяем кэш (если инициализирован)
     if (GridCache.Num() > 0)
     {
         if (const FGridCell* Cell = GridCache.Find(GridPos))
@@ -126,7 +108,6 @@ bool UMAPFPlanner::IsCellPassable(FVector WorldPosition) const
         }
     }
 
-    // 3. Если кэш пуст - проверяем напрямую
     return !CheckStaticObstacle(WorldPosition);
 }
 
@@ -137,14 +118,24 @@ bool UMAPFPlanner::IsWithinGridBounds(const FIntVector& GridPos) const
 }
 
 // ============================================================================
-// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// HELPER FUNCTIONS
 // ============================================================================
 
 uint64 UMAPFPlanner::PackKey(int32 X, int32 Y, int32 T) const
 {
-    // Упаковываем координаты в uint64 для быстрого поиска
-    // Смещения гарантируют положительные значения
-    return ((uint64)(X + 10000) << 32) | ((uint64)(Y + 10000) << 16) | (uint64)(T + 1000);
+    // Pack as: [X(20 bits)][Y(20 bits)][T(24 bits)]
+    uint64 PackedX = (uint64)(X + 524288) & 0xFFFFF; // 20 bits, offset by 2^19
+    uint64 PackedY = (uint64)(Y + 524288) & 0xFFFFF;
+    uint64 PackedT = (uint64)(T + 8388608) & 0xFFFFFF; // 24 bits, offset by 2^23
+
+    return (PackedX << 44) | (PackedY << 24) | PackedT;
+}
+
+void UMAPFPlanner::UnpackKey(uint64 Key, int32& OutX, int32& OutY, int32& OutT) const
+{
+    OutX = (int32)((Key >> 44) & 0xFFFFF) - 524288;
+    OutY = (int32)((Key >> 24) & 0xFFFFF) - 524288;
+    OutT = (int32)(Key & 0xFFFFFF) - 8388608;
 }
 
 FIntVector UMAPFPlanner::WorldToGrid(FVector Pos) const
@@ -167,8 +158,10 @@ FVector UMAPFPlanner::GridToWorld(FIntVector GridPos) const
 
 float UMAPFPlanner::Heuristic(const FIntVector& Current, const FIntVector& Goal) const
 {
-    // Манхэттенское расстояние (адаптировано для 4-связного графа)
-    return static_cast<float>(FMath::Abs(Goal.X - Current.X) + FMath::Abs(Goal.Y - Current.Y));
+    // Octile distance for better diagonal estimation
+    int32 dx = FMath::Abs(Goal.X - Current.X);
+    int32 dy = FMath::Abs(Goal.Y - Current.Y);
+    return (dx + dy) + (FMath::Sqrt(2.0f) - 2.0f) * FMath::Min(dx, dy);
 }
 
 TArray<FIntVector> UMAPFPlanner::GetFootprintCells(int32 X, int32 Y, int32 T) const
@@ -188,27 +181,59 @@ TArray<FIntVector> UMAPFPlanner::GetFootprintCells(int32 X, int32 Y, int32 T) co
 }
 
 // ============================================================================
-// ПРОВЕРКА КОНФЛИКТОВ
+// CONFLICT CHECKING WITH PRIORITY
 // ============================================================================
 
-bool UMAPFPlanner::CheckVertexConflict(const FIntVector& Loc, int32 AgentID) const
+float UMAPFPlanner::CalculateConflictPenalty(const FIntVector& Loc, int32 AgentID, float Priority) const
+{
+    uint64 Key = PackKey(Loc.X, Loc.Y, Loc.Z);
+
+    if (const FReservationEntry* Entry = ReservationTable.Find(Key))
+    {
+        if (Entry->AgentID == AgentID)
+        {
+            return 0.0f;  // Own reservation
+        }
+
+        // Higher priority agents get lower penalties
+        if (Priority < Entry->Priority)
+        {
+            return ConflictCostFactor * 0.1f;  // Can override lower priority
+        }
+        else
+        {
+            return ConflictCostFactor;  // Full penalty
+        }
+    }
+
+    return 0.0f;  // No reservation
+}
+
+bool UMAPFPlanner::CheckVertexConflict(const FIntVector& Loc, int32 AgentID, float Priority) const
 {
     TArray<FIntVector> Footprint = GetFootprintCells(Loc.X, Loc.Y, Loc.Z);
 
     for (const FIntVector& Cell : Footprint)
     {
         uint64 Key = PackKey(Cell.X, Cell.Y, Cell.Z);
-        if (ReservationTable.Contains(Key) && ReservationTable[Key] != AgentID)
+        if (const FReservationEntry* Entry = ReservationTable.Find(Key))
         {
-            return true; // Вершинный конфликт обнаружен
+            if (Entry->AgentID != AgentID)
+            {
+                // Check if we can override based on priority
+                if (Priority >= Entry->Priority && bEnableCooperativePlanning)
+                {
+                    continue;  // Can override
+                }
+                return true;  // Vertex conflict
+            }
         }
     }
     return false;
 }
 
-bool UMAPFPlanner::CheckEdgeConflict(const FIntVector& From, const FIntVector& To, int32 T, int32 AgentID) const
+bool UMAPFPlanner::CheckEdgeConflict(const FIntVector& From, const FIntVector& To, int32 T, int32 AgentID, float Priority) const
 {
-    // Проверяем размен позициями (edge conflict)
     TArray<FIntVector> FootFrom = GetFootprintCells(From.X, From.Y, T);
     TArray<FIntVector> FootTo = GetFootprintCells(To.X, To.Y, T + 1);
 
@@ -219,40 +244,71 @@ bool UMAPFPlanner::CheckEdgeConflict(const FIntVector& From, const FIntVector& T
             uint64 KeySwap1 = PackKey(C2.X, C2.Y, T);
             uint64 KeySwap2 = PackKey(C1.X, C1.Y, T + 1);
 
-            if (ReservationTable.Contains(KeySwap1) && ReservationTable.Contains(KeySwap2))
+            const FReservationEntry* Entry1 = ReservationTable.Find(KeySwap1);
+            const FReservationEntry* Entry2 = ReservationTable.Find(KeySwap2);
+
+            if (Entry1 && Entry2 && Entry1->AgentID == Entry2->AgentID && Entry1->AgentID != AgentID)
             {
-                int32 OtherID = ReservationTable[KeySwap1];
-                if (OtherID != AgentID && OtherID == ReservationTable[KeySwap2])
+                if (Priority >= Entry1->Priority && bEnableCooperativePlanning)
                 {
-                    return true; // Рёберный конфликт (swap)
+                    continue;  // Can override
                 }
+                return true;  // Edge conflict (swap)
             }
         }
     }
     return false;
 }
 
+bool UMAPFPlanner::TryStealReservation(int32 NewAgentID, int32 OldAgentID, const FIntVector& Location, float NewPriority)
+{
+    uint64 Key = PackKey(Location.X, Location.Y, Location.Z);
+
+    if (FReservationEntry* Entry = ReservationTable.Find(Key))
+    {
+        if (Entry->AgentID == OldAgentID && NewPriority < Entry->Priority)
+        {
+            Entry->AgentID = NewAgentID;
+            Entry->Priority = NewPriority;
+            Entry->Timestamp = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+
+            UE_LOG(LogTemp, Log, TEXT("MAPF: Agent %d stole reservation from Agent %d at (%d,%d,%d)"),
+                NewAgentID, OldAgentID, Location.X, Location.Y, Location.Z);
+            return true;
+        }
+    }
+    return false;
+}
+
 // ============================================================================
-// ОСНОВНОЙ АЛГОРИТМ A* В ПРОСТРАНСТВЕ-ВРЕМЕНИ
+// COOPERATIVE A* WITH TIME WINDOWS
 // ============================================================================
 
-TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVector GoalWorld, float StartTime)
+TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVector GoalWorld, float StartTime, float Priority)
 {
-    // Преобразуем в сетку
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return TArray<FVector>();
+    }
+
+    float CurrentWorldTime = World->GetTimeSeconds();
+    CleanupStaleReservations(CurrentWorldTime);
+
     FIntVector StartGrid = WorldToGrid(StartWorld);
     StartGrid.Z = FMath::CeilToInt(StartTime / TimeStepSec);
 
     FIntVector GoalGrid = WorldToGrid(GoalWorld);
 
-    // Проверяем проходимость цели
+    // Check if goal is reachable
     if (!IsCellPassable(GoalWorld))
     {
-        UE_LOG(LogTemp, Warning, TEXT("MAPF: Goal position (%.1f, %.1f) is not passable!"),
-            GoalWorld.X, GoalWorld.Y);
+        UE_LOG(LogTemp, Warning, TEXT("MAPF: Goal position (%.1f, %.1f) is not passable for Agent %d!"),
+            GoalWorld.X, GoalWorld.Y, AgentID);
         return TArray<FVector>();
     }
 
-    // Структуры данных для A*
+    // Data structures for Cooperative A*
     TArray<FSpaceTimeNode> Nodes;
     Nodes.Reserve(MaxSearchNodes);
 
@@ -260,7 +316,7 @@ TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVecto
     TSet<int32> ClosedSet;
     TMap<uint64, int32> GridToNodeIdx;
 
-    // Стартовый узел
+    // Start node
     FSpaceTimeNode StartNode;
     StartNode.Loc = StartGrid;
     StartNode.G = 0;
@@ -268,28 +324,28 @@ TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVecto
     StartNode.F = StartNode.H;
     StartNode.ParentIndex = INDEX_NONE;
     StartNode.bIsWait = false;
+    StartNode.WaitCount = 0;
 
     int32 StartIdx = Nodes.Add(StartNode);
     OpenSet.Add(StartIdx);
     GridToNodeIdx.Add(PackKey(StartGrid.X, StartGrid.Y, StartGrid.Z), StartIdx);
 
-    // Возможные действия: ждать, двигаться в 4 направлениях
+    // Movement actions with waiting penalized
     TArray<FIntVector> Deltas = {
-        FIntVector(0, 0, 0),   // Wait
+        FIntVector(0, 0, 0),   // Wait (penalized)
         FIntVector(1, 0, 0),   // Right
         FIntVector(-1, 0, 0),  // Left
-        FIntVector(0, 1, 0),   // Up
-        FIntVector(0, -1, 0)   // Down
+        FIntVector(0, 1, 0),   // Forward
+        FIntVector(0, -1, 0)   // Backward
     };
 
     int32 GoalIndex = INDEX_NONE;
-    int32 BlockedCellsCount = 0;
-    int32 ConflictCount = 0;
+    int32 NodesExplored = 0;
 
-    // Основной цикл A*
+    // Main search loop
     while (OpenSet.Num() > 0 && Nodes.Num() < MaxSearchNodes)
     {
-        // 1. Выбираем узел с минимальным F
+        // Find node with minimum F
         int32 CurrentIdx = INDEX_NONE;
         float MinF = TNumericLimits<float>::Max();
 
@@ -306,18 +362,19 @@ TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVecto
 
         OpenSet.Remove(CurrentIdx);
         ClosedSet.Add(CurrentIdx);
+        NodesExplored++;
 
         const FSpaceTimeNode& Current = Nodes[CurrentIdx];
         int32 CurTime = Current.Loc.Z;
 
-        // 2. Проверка достижения цели
+        // Check goal reached
         if (Current.Loc.X == GoalGrid.X && Current.Loc.Y == GoalGrid.Y)
         {
             GoalIndex = CurrentIdx;
             break;
         }
 
-        // 3. Генерация потомков
+        // Generate successors
         for (const FIntVector& Delta : Deltas)
         {
             FIntVector NextLoc = FIntVector(
@@ -326,44 +383,56 @@ TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVecto
                 CurTime + 1
             );
 
-            // Проверка временного горизонта
+            // Time horizon check
             if (NextLoc.Z > StartGrid.Z + MaxTimeHorizon)
             {
                 continue;
             }
 
-            // Проверка границ сетки
+            // Grid bounds check
             if (!IsWithinGridBounds(NextLoc))
             {
                 continue;
             }
 
-            // 🔥 ПРОВЕРКА СТАТИЧЕСКИХ ПРЕПЯТСТВИЙ
+            // Static obstacle check
             FVector NextWorldPos = GridToWorld(NextLoc);
             if (!IsCellPassable(NextWorldPos))
             {
-                BlockedCellsCount++;
                 continue;
             }
 
             bool bIsWait = (Delta.X == 0 && Delta.Y == 0);
 
-            // Проверка вершинных конфликтов
-            if (CheckVertexConflict(NextLoc, AgentID))
+            // Prevent infinite waiting
+            if (bIsWait && Current.WaitCount >= MaxConsecutiveWaits)
             {
-                ConflictCount++;
                 continue;
             }
 
-            // Проверка рёберных конфликтов (только для перемещений)
-            if (!bIsWait && CheckEdgeConflict(Current.Loc, NextLoc, CurTime, AgentID))
+            // Calculate movement cost
+            float MoveCost = bIsWait ? WaitCostFactor : 1.0f;
+
+            // Check vertex conflicts with priority
+            float VertexPenalty = CalculateConflictPenalty(NextLoc, AgentID, Priority);
+            if (VertexPenalty >= ConflictCostFactor)
             {
-                ConflictCount++;
+                // Can't override this reservation
                 continue;
             }
+            MoveCost += VertexPenalty;
 
-            // Вычисление стоимости
-            float TentativeG = Current.G + 1.0f;
+            // Check edge conflicts (only for moves)
+            if (!bIsWait)
+            {
+                if (CheckEdgeConflict(Current.Loc, NextLoc, CurTime, AgentID, Priority))
+                {
+                    continue;
+                }
+            }
+
+            // Calculate total cost
+            float TentativeG = Current.G + MoveCost;
             float H = Heuristic(NextLoc, GoalGrid);
             float F = TentativeG + H;
 
@@ -371,11 +440,9 @@ TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVecto
             bool bBetter = false;
             int32 ExistingIdx = INDEX_NONE;
 
-            // Проверка, существует ли уже этот узел
-            if (GridToNodeIdx.Contains(NextKey))
+            if (int32* FoundIdx = GridToNodeIdx.Find(NextKey))
             {
-                ExistingIdx = GridToNodeIdx[NextKey];
-
+                ExistingIdx = *FoundIdx;
                 if (TentativeG < Nodes[ExistingIdx].G)
                 {
                     bBetter = true;
@@ -387,7 +454,6 @@ TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVecto
                 }
             }
 
-            // Добавляем или обновляем узел
             if (bBetter || ExistingIdx == INDEX_NONE)
             {
                 FSpaceTimeNode NewNode;
@@ -397,6 +463,7 @@ TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVecto
                 NewNode.F = F;
                 NewNode.ParentIndex = CurrentIdx;
                 NewNode.bIsWait = bIsWait;
+                NewNode.WaitCount = bIsWait ? Current.WaitCount + 1 : 0;
 
                 if (ExistingIdx != INDEX_NONE)
                 {
@@ -412,37 +479,42 @@ TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVecto
         }
     }
 
-    // Логирование статистики
-    if (BlockedCellsCount > 0 || ConflictCount > 0)
-    {
-        UE_LOG(LogTemp, Log, TEXT("MAPF: Agent %d - Blocked: %d, Conflicts: %d, Nodes: %d"),
-            AgentID, BlockedCellsCount, ConflictCount, Nodes.Num());
-    }
-
-    // Восстановление пути
+    // Reconstruct path
     TArray<FVector> WorldPath;
     if (GoalIndex != INDEX_NONE)
     {
+        TArray<FSpaceTimeNode> ReversePath;
         int32 Curr = GoalIndex;
         while (Curr != INDEX_NONE)
         {
-            WorldPath.Insert(GridToWorld(Nodes[Curr].Loc), 0);
+            ReversePath.Add(Nodes[Curr]);
             Curr = Nodes[Curr].ParentIndex;
         }
+
+        // Reverse to get forward path
+        for (int32 i = ReversePath.Num() - 1; i >= 0; --i)
+        {
+            WorldPath.Add(GridToWorld(ReversePath[i].Loc));
+        }
+
+        UE_LOG(LogTemp, Log, TEXT("MAPF: Path found for Agent %d - %d points, %d nodes explored, %d waits"),
+            AgentID, WorldPath.Num(), NodesExplored,
+            [&]() { int32 w = 0; for (const auto& n : ReversePath) if (n.bIsWait) w++; return w; }());
     }
     else
     {
-        UE_LOG(LogTemp, Warning, TEXT("MAPF: Path NOT FOUND for Agent %d. Goal unreachable or fully blocked."), AgentID);
+        UE_LOG(LogTemp, Warning, TEXT("MAPF: Path NOT FOUND for Agent %d after exploring %d nodes"),
+            AgentID, NodesExplored);
     }
 
     return WorldPath;
 }
 
 // ============================================================================
-// РЕЗЕРВИРОВАНИЕ И ОСВОБОЖДЕНИЕ ПУТИ
+// RESERVATION MANAGEMENT
 // ============================================================================
 
-bool UMAPFPlanner::ReservePath(int32 AgentID, const TArray<FIntVector>& Path)
+bool UMAPFPlanner::ReservePath(int32 AgentID, const TArray<FIntVector>& Path, float Priority)
 {
     if (Path.Num() == 0)
     {
@@ -450,7 +522,10 @@ bool UMAPFPlanner::ReservePath(int32 AgentID, const TArray<FIntVector>& Path)
         return false;
     }
 
-    // 1. Проверка всех ячеек на конфликты
+    UWorld* World = GetWorld();
+    float CurrentTime = World ? World->GetTimeSeconds() : 0.0f;
+
+    // Try to reserve all cells
     for (const FIntVector& Loc : Path)
     {
         TArray<FIntVector> Foot = GetFootprintCells(Loc.X, Loc.Y, Loc.Z);
@@ -459,30 +534,35 @@ bool UMAPFPlanner::ReservePath(int32 AgentID, const TArray<FIntVector>& Path)
         {
             uint64 Key = PackKey(Cell.X, Cell.Y, Cell.Z);
 
-            if (ReservationTable.Contains(Key) && ReservationTable[Key] != AgentID)
+            if (FReservationEntry* Existing = ReservationTable.Find(Key))
             {
-                UE_LOG(LogTemp, Warning, TEXT("MAPF: Reservation conflict at (%d,%d,t=%d) for Agent %d"),
-                    Cell.X, Cell.Y, Cell.Z, AgentID);
-                return false;
+                if (Existing->AgentID != AgentID)
+                {
+                    // Check if we can override
+                    if (Priority < Existing->Priority)
+                    {
+                        // Steal reservation
+                        Existing->AgentID = AgentID;
+                        Existing->Priority = Priority;
+                        Existing->Timestamp = CurrentTime;
+                    }
+                    else
+                    {
+                        UE_LOG(LogTemp, Warning, TEXT("MAPF: Reservation conflict at (%d,%d,%d) - Agent %d vs %d"),
+                            Cell.X, Cell.Y, Cell.Z, AgentID, Existing->AgentID);
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                ReservationTable.Add(Key, FReservationEntry(AgentID, Priority, CurrentTime));
             }
         }
     }
 
-    // 2. Атомарное резервирование
-    for (const FIntVector& Loc : Path)
-    {
-        TArray<FIntVector> Foot = GetFootprintCells(Loc.X, Loc.Y, Loc.Z);
-
-        for (const FIntVector& Cell : Foot)
-        {
-            uint64 Key = PackKey(Cell.X, Cell.Y, Cell.Z);
-            ReservationTable.Add(Key, AgentID);
-        }
-    }
-
-    UE_LOG(LogTemp, Log, TEXT("MAPF: Path reserved for Agent %d (%d points, clearance=%d)"),
-        AgentID, Path.Num(), AgentClearance);
-
+    UE_LOG(LogTemp, Log, TEXT("MAPF: Path reserved for Agent %d (%d points, priority %.2f)"),
+        AgentID, Path.Num(), Priority);
     return true;
 }
 
@@ -498,19 +578,49 @@ void UMAPFPlanner::ReleasePath(int32 AgentID, const TArray<FIntVector>& Path)
         {
             uint64 Key = PackKey(Cell.X, Cell.Y, Cell.Z);
 
-            if (ReservationTable.Contains(Key) && ReservationTable[Key] == AgentID)
+            if (FReservationEntry* Entry = ReservationTable.Find(Key))
             {
-                ReservationTable.Remove(Key);
-                ReleasedCount++;
+                if (Entry->AgentID == AgentID)
+                {
+                    ReservationTable.Remove(Key);
+                    ReleasedCount++;
+                }
             }
         }
     }
 
-    UE_LOG(LogTemp, Verbose, TEXT("MAPF: Released %d cells for Agent %d"), ReleasedCount, AgentID);
+    if (ReleasedCount > 0)
+    {
+        UE_LOG(LogTemp, Verbose, TEXT("MAPF: Released %d cells for Agent %d"), ReleasedCount, AgentID);
+    }
+}
+
+void UMAPFPlanner::CleanupStaleReservations(float CurrentTime)
+{
+    const float StaleThreshold = 30.0f; // 30 seconds
+    TArray<uint64> StaleKeys;
+
+    for (const auto& Pair : ReservationTable)
+    {
+        if (CurrentTime - Pair.Value.Timestamp > StaleThreshold)
+        {
+            StaleKeys.Add(Pair.Key);
+        }
+    }
+
+    for (uint64 Key : StaleKeys)
+    {
+        ReservationTable.Remove(Key);
+    }
+
+    if (StaleKeys.Num() > 0)
+    {
+        UE_LOG(LogTemp, Log, TEXT("MAPF: Cleaned up %d stale reservations"), StaleKeys.Num());
+    }
 }
 
 // ============================================================================
-// ПОЛУЧЕНИЕ ПЛАНИРОВЩИКА
+// UTILITY FUNCTIONS
 // ============================================================================
 
 UMAPFPlanner* UMAPFPlanner::GetPlanner(const UObject* WorldContextObject)
@@ -538,36 +648,51 @@ UMAPFPlanner* UMAPFPlanner::GetPlanner(const UObject* WorldContextObject)
     return GameInstance->GetSubsystem<UMAPFPlanner>();
 }
 
+void UMAPFPlanner::DebugPrintReservations() const
+{
+    UE_LOG(LogTemp, Log, TEXT("=== MAPF Reservation Table (%d entries) ==="), ReservationTable.Num());
+
+    for (const auto& Pair : ReservationTable)
+    {
+        int32 X, Y, T;
+        UnpackKey(Pair.Key, X, Y, T);
+        UE_LOG(LogTemp, Log, TEXT("  (%d,%d,%d) -> Agent %d, Priority %.2f"),
+            X, Y, T, Pair.Value.AgentID, Pair.Value.Priority);
+    }
+}
+
 void UMAPFPlanner::DrawDebugGrid(float Duration, bool bDrawCells)
 {
     UWorld* World = GetWorld();
     if (!World) return;
 
-    // Мировые координаты углов сетки
     FVector MinWorld = GridToWorld(FIntVector(GridMinX, GridMinY, 0));
     FVector MaxWorld = GridToWorld(FIntVector(GridMaxX, GridMaxY, 0));
-
-    // Поднимаем над полом для наглядности
     MinWorld.Z = 5.0f;
     MaxWorld.Z = 5.0f;
 
-    // 1. Рисуем границы сетки (красный прямоугольник)
     FVector Center = (MinWorld + MaxWorld) * 0.5f;
     FVector Extent = (MaxWorld - MinWorld) * 0.5f;
     DrawDebugBox(World, Center, FVector(Extent.X, Extent.Y, 2.0f), FColor::Red, false, Duration, 0, 3.0f);
 
-    // 2. Опционально: рисуем центры ячеек (зелёные точки)
     if (bDrawCells)
     {
-        // Рисуем каждую 5-ю ячейку, чтобы не просадить FPS
-        int32 Step = FMath::Max(1, (GridMaxX - GridMinX) / 15);
+        int32 Step = FMath::Max(1, (GridMaxX - GridMinX) / 20);
         for (int32 X = GridMinX; X <= GridMaxX; X += Step)
         {
             for (int32 Y = GridMinY; Y <= GridMaxY; Y += Step)
             {
                 FVector CellCenter = GridToWorld(FIntVector(X, Y, 0));
                 CellCenter.Z = 2.0f;
-                DrawDebugSphere(World, CellCenter, 3.0f, 4, FColor::Green, false, Duration);
+
+                FColor Color = FColor::Green;
+                uint64 Key = PackKey(X, Y, 0);
+                if (ReservationTable.Contains(Key))
+                {
+                    Color = FColor::Orange;
+                }
+
+                DrawDebugSphere(World, CellCenter, 3.0f, 4, Color, false, Duration);
             }
         }
     }

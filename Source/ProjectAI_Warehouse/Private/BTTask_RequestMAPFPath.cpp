@@ -22,9 +22,15 @@ EBTNodeResult::Type UBTTask_RequestMAPFPath::ExecuteTask(UBehaviorTreeComponent&
         return EBTNodeResult::Failed;
     }
 
-    // Получаем цель и ID агента
     FVector Goal = BB->GetValueAsVector(GoalLocationKey);
     CurrentAgentID = BB->GetValueAsInt(AgentIDKey);
+
+    // Get agent priority from blackboard (lower = higher priority)
+    float AgentPriority = BB->GetValueAsFloat("AgentPriority");
+    if (AgentPriority <= 0.0f)
+    {
+        AgentPriority = static_cast<float>(CurrentAgentID) * 0.1f; // Default: ID-based priority
+    }
 
     if (Goal.IsNearlyZero() || CurrentAgentID < 0)
     {
@@ -32,7 +38,6 @@ EBTNodeResult::Type UBTTask_RequestMAPFPath::ExecuteTask(UBehaviorTreeComponent&
         return EBTNodeResult::Failed;
     }
 
-    // Получаем персонажа
     AAIController* AIController = OwnerComp.GetAIOwner();
     if (!AIController) return EBTNodeResult::Failed;
 
@@ -46,7 +51,6 @@ EBTNodeResult::Type UBTTask_RequestMAPFPath::ExecuteTask(UBehaviorTreeComponent&
         return EBTNodeResult::Failed;
     }
 
-    // Получаем компонент следования
     UPathFollowerComponent* Follower = Pawn->FindComponentByClass<UPathFollowerComponent>();
     if (!Follower)
     {
@@ -54,7 +58,6 @@ EBTNodeResult::Type UBTTask_RequestMAPFPath::ExecuteTask(UBehaviorTreeComponent&
         return EBTNodeResult::Failed;
     }
 
-    // Получаем планировщик
     UMAPFPlanner* Planner = UMAPFPlanner::GetPlanner(Pawn);
     if (!Planner)
     {
@@ -62,14 +65,14 @@ EBTNodeResult::Type UBTTask_RequestMAPFPath::ExecuteTask(UBehaviorTreeComponent&
         return EBTNodeResult::Failed;
     }
 
-    // Планируем путь
+    // Plan path with priority
     float CurrentTime = Pawn->GetWorld()->GetTimeSeconds();
     FVector StartPos = Pawn->GetActorLocation();
 
-    UE_LOG(LogTemp, Log, TEXT("BTTask: Planning path for Agent %d from (%.1f,%.1f) to (%.1f,%.1f)"),
-        CurrentAgentID, StartPos.X, StartPos.Y, Goal.X, Goal.Y);
+    UE_LOG(LogTemp, Log, TEXT("BTTask: Planning path for Agent %d (priority %.2f) from (%.1f,%.1f) to (%.1f,%.1f)"),
+        CurrentAgentID, AgentPriority, StartPos.X, StartPos.Y, Goal.X, Goal.Y);
 
-    TArray<FVector> Path = Planner->PlanPath(CurrentAgentID, StartPos, Goal, CurrentTime);
+    TArray<FVector> Path = Planner->PlanPath(CurrentAgentID, StartPos, Goal, CurrentTime, AgentPriority);
 
     if (Path.Num() < 2)
     {
@@ -77,7 +80,7 @@ EBTNodeResult::Type UBTTask_RequestMAPFPath::ExecuteTask(UBehaviorTreeComponent&
         return EBTNodeResult::Failed;
     }
 
-    // Конвертируем в сетку для резервирования
+    // Convert to grid for reservation
     TArray<FIntVector> GridPath;
     GridPath.Reserve(Path.Num());
     for (const FVector& P : Path)
@@ -85,14 +88,31 @@ EBTNodeResult::Type UBTTask_RequestMAPFPath::ExecuteTask(UBehaviorTreeComponent&
         GridPath.Add(Planner->WorldToGrid(P));
     }
 
-    // Резервируем путь
-    if (!Planner->ReservePath(CurrentAgentID, GridPath))
+    // Try to reserve path
+    if (!Planner->ReservePath(CurrentAgentID, GridPath, AgentPriority))
     {
-        UE_LOG(LogTemp, Warning, TEXT("BTTask: Failed to reserve path for Agent %d"), CurrentAgentID);
-        return EBTNodeResult::Failed;
+        UE_LOG(LogTemp, Warning, TEXT("BTTask: Failed to reserve path for Agent %d - replanning with higher priority"), CurrentAgentID);
+
+        // Try again with higher priority
+        Path = Planner->PlanPath(CurrentAgentID, StartPos, Goal, CurrentTime, -1.0f);
+        if (Path.Num() < 2)
+        {
+            return EBTNodeResult::Failed;
+        }
+
+        GridPath.Empty();
+        for (const FVector& P : Path)
+        {
+            GridPath.Add(Planner->WorldToGrid(P));
+        }
+
+        if (!Planner->ReservePath(CurrentAgentID, GridPath, -1.0f))
+        {
+            return EBTNodeResult::Failed;
+        }
     }
 
-    // Передаём путь компоненту движения
+    // Set path to follower
     Follower->AgentID = CurrentAgentID;
     Follower->SetPath(Path);
 
@@ -111,7 +131,7 @@ void UBTTask_RequestMAPFPath::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
     ElapsedTime += DeltaSeconds;
 
-    // Таймаут планирования
+    // Timeout check
     if (ElapsedTime >= PlanningTimeout)
     {
         UE_LOG(LogTemp, Warning, TEXT("BTTask: Planning timeout for Agent %d"), CurrentAgentID);
@@ -120,7 +140,7 @@ void UBTTask_RequestMAPFPath::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
         return;
     }
 
-    // Проверяем завершение движения
+    // Check path completion
     AAIController* AIController = OwnerComp.GetAIOwner();
     if (!AIController) return;
 
