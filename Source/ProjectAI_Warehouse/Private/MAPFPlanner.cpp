@@ -4,6 +4,7 @@
 #include "DrawDebugHelpers.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Engine/World.h"
+#include "SimulationDataCollector.h"
 
 // ============================================================================
 // INITIALIZATION
@@ -548,9 +549,21 @@ bool UMAPFPlanner::ReservePath(int32 AgentID, const TArray<FIntVector>& Path, fl
                     }
                     else
                     {
-                        UE_LOG(LogTemp, Warning, TEXT("MAPF: Reservation conflict at (%d,%d,%d) - Agent %d vs %d"),
-                            Cell.X, Cell.Y, Cell.Z, AgentID, Existing->AgentID);
-                        return false;
+                        // ============ ВОТ ЗДЕСЬ РЕАЛЬНЫЙ КОНФЛИКТ ============
+
+                        // Логируем конфликт в DataCollector
+                        if (USimulationDataCollector* Collector = USimulationDataCollector::GetCollector(this))
+                        {
+                            Collector->TotalConflictsDetected++;
+                        }
+
+                        // Логируем детали конфликта
+                        UE_LOG(LogTemp, Warning, TEXT("MAPF: Reservation conflict at (%d,%d,%d) - Agent %d (priority %.2f) vs Agent %d (priority %.2f)"),
+                            Cell.X, Cell.Y, Cell.Z,
+                            AgentID, Priority,
+                            Existing->AgentID, Existing->Priority);
+
+                        return false; // Не смогли зарезервировать
                     }
                 }
             }

@@ -3,6 +3,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "MAPFPlanner.h"
 #include "DrawDebugHelpers.h"
+#include "SimulationDataCollector.h"
 
 UPathFollowerComponent::UPathFollowerComponent()
 {
@@ -77,6 +78,21 @@ void UPathFollowerComponent::TickComponent(float DeltaTime, ELevelTick TickType,
         if (bFinished && !bReleased)
         {
             bReleased = true;
+
+            if (USimulationDataCollector* Collector = USimulationDataCollector::GetCollector(GetOwner()))
+            {
+                FAgentMetrics* Metrics = Collector->AgentMetricsMap.Find(AgentID);
+                if (Metrics)
+                {
+                    // Пройденное расстояние (сумма сегментов пути)
+                    float PathDistance = 0;
+                    for (int32 i = 0; i < Waypoints.Num() - 1; i++)
+                    {
+                        PathDistance += FVector::Dist(Waypoints[i], Waypoints[i + 1]);
+                    }
+                    Metrics->TotalDistance += PathDistance;
+                }
+            }
 
             // Release path reservations
             UMAPFPlanner* Planner = UMAPFPlanner::GetPlanner(GetOwner());
