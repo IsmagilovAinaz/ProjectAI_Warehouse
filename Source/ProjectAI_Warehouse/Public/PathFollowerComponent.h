@@ -17,8 +17,8 @@ public:
     int32 AgentID = 0;
 
     // === ƒ¬»∆≈Õ»≈ ===
-    UPROPERTY(EditAnywhere, Category = "Movement", meta = (ClampMin = "50", ClampMax = "500"))
-    float Speed = 200.0f;
+    UPROPERTY(EditAnywhere, Category = "Movement", meta = (ClampMin = "50", ClampMax = "5000"))
+    float Speed = 500.0f;
 
     UPROPERTY(EditAnywhere, Category = "Movement", meta = (ClampMin = "5", ClampMax = "50"))
     float ArrivalThreshold = 25.0f;
@@ -43,15 +43,21 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Events")
     void OnPathFinished();
 
+    TArray<FVector> Waypoints;
+
+    int32 CurrentIndex = 0;
+    void DrawDebugPath();
+    void ClearDebugPath();
+
+    bool bFinished = false;
+    bool bReleased = false;
+
+    
+
 protected:
     virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 private:
-    TArray<FVector> Waypoints;
-    int32 CurrentIndex = 0;
-    bool bFinished = false;
-    bool bReleased = false;
-
-    void DrawDebugPath();
-    void ClearDebugPath();
+    
+    
 };

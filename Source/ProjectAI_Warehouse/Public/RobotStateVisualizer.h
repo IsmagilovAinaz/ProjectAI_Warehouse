@@ -65,6 +65,12 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Robot Visualizer")
     static void UpdateAgentState(AActor* Owner, ERobotVisualState NewState);
 
+    UFUNCTION(BlueprintCallable)
+    void SetHighlighted(bool bHighlighted);
+
+    UPROPERTY(EditAnywhere, Category = "Highlight")
+    FLinearColor HighlightColor = FLinearColor::Yellow;
+
 protected:
     virtual void BeginPlay() override;
 

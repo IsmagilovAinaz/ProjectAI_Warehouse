@@ -167,3 +167,31 @@ void URobotStateVisualizer::UpdateAgentState(AActor* Owner, ERobotVisualState Ne
 
     Viz->SetVisualState(NewState);
 }
+
+void URobotStateVisualizer::SetHighlighted(bool bHighlighted)
+{
+    if (bHighlighted)
+    {
+        // Временно показать состояние "выбран"
+        FRobotStateInfo Info;
+        Info.StateText = FText::FromString(TEXT("ВЫБРАН"));
+        Info.StateColor = HighlightColor;
+
+        if (StatusWidgetInstance)
+        {
+            UEditableTextBox* StatusBox = Cast<UEditableTextBox>(
+                StatusWidgetInstance->GetWidgetFromName(FName(TEXT("StatusValue")))
+            );
+            if (StatusBox)
+            {
+                StatusBox->SetText(Info.StateText);
+                // Мигание или постоянный цвет
+            }
+        }
+    }
+    else
+    {
+        // Восстановить статус
+        UpdateStatusWidget();
+    }
+}

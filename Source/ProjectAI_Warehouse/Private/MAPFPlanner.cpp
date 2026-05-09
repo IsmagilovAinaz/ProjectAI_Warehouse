@@ -85,7 +85,7 @@ bool UMAPFPlanner::CheckStaticObstacle(FVector Position) const
     float HitZ = Hit.Location.Z;
     float TargetZ = Position.Z;
 
-    if (FMath::Abs(HitZ - TargetZ) > 50.0f)
+    if (FMath::Abs(HitZ - TargetZ) > 10.0f)
     {
         return true;
     }
@@ -333,11 +333,16 @@ TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVecto
 
     // Movement actions with waiting penalized
     TArray<FIntVector> Deltas = {
-        FIntVector(0, 0, 0),   // Wait (penalized)
-        FIntVector(1, 0, 0),   // Right
-        FIntVector(-1, 0, 0),  // Left
-        FIntVector(0, 1, 0),   // Forward
-        FIntVector(0, -1, 0)   // Backward
+    FIntVector(0, 0, 0),    // Wait (penalized)
+    FIntVector(1, 0, 0),    // Right
+    FIntVector(-1, 0, 0),   // Left
+    FIntVector(0, 1, 0),    // Forward
+    FIntVector(0, -1, 0),   // Backward
+    // Диагональные движения
+    FIntVector(1, 1, 0),    // Forward-Right
+    FIntVector(-1, 1, 0),   // Forward-Left
+    FIntVector(1, -1, 0),   // Backward-Right
+    FIntVector(-1, -1, 0)   // Backward-Left
     };
 
     int32 GoalIndex = INDEX_NONE;
@@ -405,6 +410,15 @@ TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVecto
 
             bool bIsWait = (Delta.X == 0 && Delta.Y == 0);
 
+            if (bIsWait)
+            {
+                // Проверить, не блокирует ли робот проход
+                if (IsBlockingNarrowPath(Current.Loc, AgentID))
+                {
+                    continue; // Нельзя ждать здесь — двигайся дальше
+                }
+            }
+
             // Prevent infinite waiting
             if (bIsWait && Current.WaitCount >= MaxConsecutiveWaits)
             {
@@ -413,6 +427,14 @@ TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVecto
 
             // Calculate movement cost
             float MoveCost = bIsWait ? WaitCostFactor : 1.0f;
+
+            bool bIsDiagonal = (FMath::Abs(Delta.X) == 1 && FMath::Abs(Delta.Y) == 1);
+            if (bIsWait)
+                MoveCost = WaitCostFactor;
+            else if (bIsDiagonal)
+                MoveCost = 1.414f; // sqrt(2) — диагональ чуть дороже
+            else
+                MoveCost = 1.0f;
 
             // Check vertex conflicts with priority
             float VertexPenalty = CalculateConflictPenalty(NextLoc, AgentID, Priority);
@@ -423,6 +445,32 @@ TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVecto
             }
             MoveCost += VertexPenalty;
 
+            //Тут штраф за близость к препятствиям
+            float ObstacleProximityPenalty = 0.0f;
+            if (AgentClearance > 1)
+            {
+                // Проверить соседние ячейки
+                int32 CheckRadius = AgentClearance;
+                for (int32 dx = -CheckRadius; dx <= CheckRadius; dx++)
+                {
+                    for (int32 dy = -CheckRadius; dy <= CheckRadius; dy++)
+                    {
+                        if (dx == 0 && dy == 0) continue;
+
+                        FIntVector Neighbor(NextLoc.X + dx, NextLoc.Y + dy, NextLoc.Z);
+                        FVector NeighborWorld = GridToWorld(Neighbor);
+
+                        if (!IsCellPassable(NeighborWorld))
+                        {
+                            // Чем ближе препятствие, тем больше штраф
+                            float Dist = FMath::Sqrt(static_cast<float>(dx * dx + dy * dy));
+                            ObstacleProximityPenalty += ObstacleAvoidanceWeight / FMath::Max(Dist, 1.0f);
+                        }
+                    }
+                }
+            }
+            MoveCost += ObstacleProximityPenalty;
+
             // Check edge conflicts (only for moves)
             if (!bIsWait)
             {
@@ -430,7 +478,35 @@ TArray<FVector> UMAPFPlanner::PlanPath(int32 AgentID, FVector StartWorld, FVecto
                 {
                     continue;
                 }
+
+                // ДОБАВИТЬ: проверка диагонального пересечения
+                if (bIsDiagonal)
+                {
+                    bool bCrossingConflict = false;
+                    for (const auto& Pair : ReservationTable)
+                    {
+                        int32 OtherX, OtherY, OtherT;
+                        UnpackKey(Pair.Key, OtherX, OtherY, OtherT);
+
+                        if (OtherT == CurTime || OtherT == CurTime + 1)
+                        {
+                            FIntVector OtherFrom = FIntVector(OtherX, OtherY, OtherT);
+                            FIntVector OtherTo = FIntVector(OtherX, OtherY, OtherT + 1);
+
+                            if (CheckDiagonalCrossing(Current.Loc, NextLoc, OtherFrom, OtherTo, CurTime))
+                            {
+                                if (Priority >= Pair.Value.Priority && bEnableCooperativePlanning)
+                                    continue;
+
+                                bCrossingConflict = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (bCrossingConflict) continue;
+                }
             }
+
 
             // Calculate total cost
             float TentativeG = Current.G + MoveCost;
@@ -713,3 +789,134 @@ void UMAPFPlanner::DrawDebugGrid(float Duration, bool bDrawCells)
     UE_LOG(LogTemp, Log, TEXT("MAPF Debug: Grid bounds drawn. X:[%d..%d] Y:[%d..%d]"),
         GridMinX, GridMaxX, GridMinY, GridMaxY);
 }
+
+bool UMAPFPlanner::CheckDiagonalCrossing(const FIntVector& FromA, const FIntVector& ToA,
+    const FIntVector& FromB, const FIntVector& ToB, int32 T) const
+{
+    // Проверка, что оба движения диагональные
+    bool bA_Diagonal = (FromA.X != ToA.X) && (FromA.Y != ToA.Y);
+    bool bB_Diagonal = (FromB.X != ToB.X) && (FromB.Y != ToB.Y);
+
+    if (!bA_Diagonal || !bB_Diagonal) return false;
+
+    // Проверка пересечения диагоналей в одной точке
+    // A: (0,0) -> (1,1), B: (0,1) -> (1,0) => пересечение в центре
+    FIntVector CrossingPoint;
+    if ((FromA.X + ToA.X) == (FromB.X + ToB.X) &&
+        (FromA.Y + ToA.Y) == (FromB.Y + ToB.Y))
+    {
+        CrossingPoint = FIntVector(
+            (FromA.X + ToA.X) / 2,
+            (FromA.Y + ToA.Y) / 2,
+            T
+        );
+        return true; // Диагонали пересекаются
+    }
+
+    return false;
+}
+
+bool UMAPFPlanner::IsBlockingNarrowPath(const FIntVector& Loc, int32 AgentID) const
+{
+    // Проверить, является ли ячейка узким местом (коридор шириной 1-2 клетки)
+    int32 FreeNeighbors = 0;
+    TArray<FIntVector> Directions = {
+        FIntVector(1,0,0), FIntVector(-1,0,0), FIntVector(0,1,0), FIntVector(0,-1,0)
+    };
+
+    for (const FIntVector& Dir : Directions)
+    {
+        FIntVector Neighbor = FIntVector(Loc.X + Dir.X, Loc.Y + Dir.Y, Loc.Z);
+        if (IsCellPassable(GridToWorld(Neighbor)))
+        {
+            FreeNeighbors++;
+        }
+    }
+
+    // Если менее 3 свободных соседей — это узкое место
+    return FreeNeighbors < 3;
+}
+
+void UMAPFPlanner::DrawReservations(float Duration)
+{
+    UWorld* World = GetWorld();
+    if (!World) return;
+
+    for (const auto& Pair : ReservationTable)
+    {
+        int32 X, Y, T;
+        UnpackKey(Pair.Key, X, Y, T);
+
+        FVector WorldPos = GridToWorld(FIntVector(X, Y, 0));
+        WorldPos.Z += 15.0f;
+
+        // Цвет зависит от приоритета
+        FColor Color = ReservationColor;
+        float Priority = Pair.Value.Priority;
+
+        if (Priority < 0) // Высокий приоритет
+            Color = FColor::Red;
+        else if (Priority < 1.0f)
+            Color = FColor::Orange;
+        else if (Priority < 5.0f)
+            Color = FColor::Yellow;
+        else
+            Color = FColor::Green;
+
+        DrawDebugSphere(World, WorldPos, ReservationSphereRadius, 8, Color, false, Duration);
+
+        // Нарисовать ID агента
+        FString AgentText = FString::FromInt(Pair.Value.AgentID);
+        DrawDebugString(World, WorldPos + FVector(0, 0, 30), AgentText, nullptr, Color, Duration);
+    }
+}
+
+/*void UMAPFPlanner::ToggleReservationVisualization()
+{
+    bShowReservations = !bShowReservations;
+    UE_LOG(LogTemp, Log, TEXT("MAPF: Reservation visualization %s"),
+        bShowReservations ? TEXT("ON") : TEXT("OFF"));
+}*/
+
+void UMAPFPlanner::StartVisualizationTimer()
+{
+    UWorld* World = GetWorld();
+    if (!World) return;
+
+    World->GetTimerManager().SetTimer(
+        VisualizationTimer,
+        this,
+        &UMAPFPlanner::DrawReservationsWrapper,
+        0.1f,  // Каждые 100 мс
+        true
+    );
+}
+
+void UMAPFPlanner::StopVisualizationTimer()
+{
+    UWorld* World = GetWorld();
+    if (!World) return;
+    World->GetTimerManager().ClearTimer(VisualizationTimer);
+}
+
+void UMAPFPlanner::DrawReservationsWrapper()
+{
+    if (bShowReservations)
+    {
+        DrawReservations(0.15f);
+    }
+}
+
+void UMAPFPlanner::ToggleReservationVisualization()
+{
+    bShowReservations = !bShowReservations;
+
+    if (bShowReservations)
+        StartVisualizationTimer();
+    else
+        StopVisualizationTimer();
+
+    UE_LOG(LogTemp, Log, TEXT("MAPF: Reservation visualization %s"),
+        bShowReservations ? TEXT("ON") : TEXT("OFF"));
+}
+

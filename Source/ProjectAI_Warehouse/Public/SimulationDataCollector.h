@@ -69,7 +69,9 @@ public:
     UPROPERTY(BlueprintReadWrite, Category = "Simulation Data")
     float SimulationStartTime = 0;
 
-private:
     UPROPERTY()
     TMap<FString, FTaskMetrics> ActiveTasks;
+
+private:
+    
 };

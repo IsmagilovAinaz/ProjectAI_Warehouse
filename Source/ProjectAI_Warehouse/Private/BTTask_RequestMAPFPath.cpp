@@ -2,7 +2,6 @@
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
 #include "GameFramework/Pawn.h"
-#include "GameFramework/Character.h"
 #include "MAPFPlanner.h"
 #include "PathFollowerComponent.h"
 
@@ -11,76 +10,107 @@ UBTTask_RequestMAPFPath::UBTTask_RequestMAPFPath()
     NodeName = TEXT("Request MAPF Path");
     bNotifyTick = true;
     bNotifyTaskFinished = true;
+
+    NextState = E_TaskState::Idle;
+    PlanningTimeout = 30.0f;
+    bIsRunning = false;
+    ElapsedTime = 0.0f;
+    CurrentAgentID = -1;
 }
 
-EBTNodeResult::Type UBTTask_RequestMAPFPath::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
+EBTNodeResult::Type UBTTask_RequestMAPFPath::ExecuteTask(
+    UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
     UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
     if (!BB)
     {
-        UE_LOG(LogTemp, Error, TEXT("BTTask: Blackboard not found"));
+        UE_LOG(LogTemp, Error, TEXT("MAPF Task: Blackboard not found"));
         return EBTNodeResult::Failed;
     }
 
-    FVector Goal = BB->GetValueAsVector(GoalLocationKey);
-    CurrentAgentID = BB->GetValueAsInt(AgentIDKey);
+    // Записать TaskState = "Executing" (индекс 1)
+    FName TaskStateName = GetKeyName(TaskState);
 
-    // Get agent priority from blackboard (lower = higher priority)
-    float AgentPriority = BB->GetValueAsFloat("AgentPriority");
-    if (AgentPriority <= 0.0f)
-    {
-        AgentPriority = static_cast<float>(CurrentAgentID) * 0.1f; // Default: ID-based priority
-    }
+    // Получить цель
+    FName GoalKeyName = GetKeyName(GoalLocationKey);
+    FVector Goal = BB->GetValueAsVector(GoalKeyName);
 
+    // Получить AgentID
+    FName AgentKeyName = GetKeyName(AgentIDKey);
+    CurrentAgentID = BB->GetValueAsInt(AgentKeyName);
+
+    // Проверка валидности
     if (Goal.IsNearlyZero() || CurrentAgentID < 0)
     {
-        UE_LOG(LogTemp, Error, TEXT("BTTask: Invalid goal or AgentID"));
+        UE_LOG(LogTemp, Error, TEXT("MAPF Task: Invalid Goal=%s or AgentID=%d"),
+            *Goal.ToString(), CurrentAgentID);
+
+        if (!TaskStateName.IsNone())
+        {
+            //BB->SetValueAsEnum(TaskStateName, 3); // Failed
+        }
         return EBTNodeResult::Failed;
     }
 
+    // Получить Pawn
     AAIController* AIController = OwnerComp.GetAIOwner();
-    if (!AIController) return EBTNodeResult::Failed;
+    if (!AIController)
+    {
+        UE_LOG(LogTemp, Error, TEXT("MAPF Task: No AIController"));
+        return EBTNodeResult::Failed;
+    }
 
     APawn* Pawn = AIController->GetPawn();
-    if (!Pawn) return EBTNodeResult::Failed;
-
-    ACharacter* Char = Cast<ACharacter>(Pawn);
-    if (!Char)
+    if (!Pawn)
     {
-        UE_LOG(LogTemp, Warning, TEXT("BTTask: Pawn is not a Character"));
+        UE_LOG(LogTemp, Error, TEXT("MAPF Task: No Pawn"));
         return EBTNodeResult::Failed;
     }
 
+    // Получить компоненты
     UPathFollowerComponent* Follower = Pawn->FindComponentByClass<UPathFollowerComponent>();
     if (!Follower)
     {
-        UE_LOG(LogTemp, Error, TEXT("BTTask: PathFollowerComponent not found on pawn"));
+        UE_LOG(LogTemp, Error, TEXT("MAPF Task: PathFollowerComponent not found on %s"), *Pawn->GetName());
         return EBTNodeResult::Failed;
     }
 
     UMAPFPlanner* Planner = UMAPFPlanner::GetPlanner(Pawn);
     if (!Planner)
     {
-        UE_LOG(LogTemp, Error, TEXT("BTTask: MAPFPlanner subsystem not found"));
+        UE_LOG(LogTemp, Error, TEXT("MAPF Task: MAPFPlanner not found"));
         return EBTNodeResult::Failed;
     }
 
-    // Plan path with priority
+    // Приоритет агента (из Blackboard или по ID)
+    float AgentPriority = BB->GetValueAsFloat(FName("AgentPriority"));
+    if (AgentPriority <= 0.0f)
+    {
+        AgentPriority = static_cast<float>(CurrentAgentID) * 0.1f;
+    }
+
+    // Построить путь
     float CurrentTime = Pawn->GetWorld()->GetTimeSeconds();
     FVector StartPos = Pawn->GetActorLocation();
 
-    UE_LOG(LogTemp, Log, TEXT("BTTask: Planning path for Agent %d (priority %.2f) from (%.1f,%.1f) to (%.1f,%.1f)"),
+    UE_LOG(LogTemp, Log, TEXT("MAPF Task: Planning for Agent %d (priority %.2f) from (%.0f,%.0f) to (%.0f,%.0f)"),
         CurrentAgentID, AgentPriority, StartPos.X, StartPos.Y, Goal.X, Goal.Y);
 
-    TArray<FVector> Path = Planner->PlanPath(CurrentAgentID, StartPos, Goal, CurrentTime, AgentPriority);
+    TArray<FVector> Path = Planner->PlanPath(
+        CurrentAgentID, StartPos, Goal, CurrentTime, AgentPriority);
 
     if (Path.Num() < 2)
     {
-        UE_LOG(LogTemp, Warning, TEXT("BTTask: No valid path found for Agent %d"), CurrentAgentID);
+        UE_LOG(LogTemp, Warning, TEXT("MAPF Task: No path found for Agent %d"), CurrentAgentID);
+
+        if (!TaskStateName.IsNone())
+        {
+            //BB->SetValueAsEnum(TaskStateName, 3); // Failed
+        }
         return EBTNodeResult::Failed;
     }
 
-    // Convert to grid for reservation
+    // Конвертировать в Grid
     TArray<FIntVector> GridPath;
     GridPath.Reserve(Path.Num());
     for (const FVector& P : Path)
@@ -88,15 +118,19 @@ EBTNodeResult::Type UBTTask_RequestMAPFPath::ExecuteTask(UBehaviorTreeComponent&
         GridPath.Add(Planner->WorldToGrid(P));
     }
 
-    // Try to reserve path
+    // Зарезервировать путь
     if (!Planner->ReservePath(CurrentAgentID, GridPath, AgentPriority))
     {
-        UE_LOG(LogTemp, Warning, TEXT("BTTask: Failed to reserve path for Agent %d - replanning with higher priority"), CurrentAgentID);
+        UE_LOG(LogTemp, Warning, TEXT("MAPF Task: Reservation failed for Agent %d, retrying with high priority"),
+            CurrentAgentID);
 
-        // Try again with higher priority
         Path = Planner->PlanPath(CurrentAgentID, StartPos, Goal, CurrentTime, -1.0f);
         if (Path.Num() < 2)
         {
+            if (!TaskStateName.IsNone())
+            {
+               // BB->SetValueAsEnum(TaskStateName, 3); // Failed
+            }
             return EBTNodeResult::Failed;
         }
 
@@ -108,15 +142,19 @@ EBTNodeResult::Type UBTTask_RequestMAPFPath::ExecuteTask(UBehaviorTreeComponent&
 
         if (!Planner->ReservePath(CurrentAgentID, GridPath, -1.0f))
         {
+            if (!TaskStateName.IsNone())
+            {
+                //BB->SetValueAsEnum(TaskStateName, 3); // Failed
+            }
             return EBTNodeResult::Failed;
         }
     }
 
-    // Set path to follower
+    // Установить путь
     Follower->AgentID = CurrentAgentID;
     Follower->SetPath(Path);
 
-    UE_LOG(LogTemp, Log, TEXT("BTTask: Path reserved and set for Agent %d (%d points)"),
+    UE_LOG(LogTemp, Log, TEXT("MAPF Task: Path set for Agent %d (%d points)"),
         CurrentAgentID, Path.Num());
 
     bIsRunning = true;
@@ -125,33 +163,98 @@ EBTNodeResult::Type UBTTask_RequestMAPFPath::ExecuteTask(UBehaviorTreeComponent&
     return EBTNodeResult::InProgress;
 }
 
-void UBTTask_RequestMAPFPath::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
+void UBTTask_RequestMAPFPath::TickTask(
+    UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
 {
-    if (!bIsRunning) return;
-
-    ElapsedTime += DeltaSeconds;
-
-    // Timeout check
-    if (ElapsedTime >= PlanningTimeout)
+    if (!bIsRunning)
     {
-        UE_LOG(LogTemp, Warning, TEXT("BTTask: Planning timeout for Agent %d"), CurrentAgentID);
-        FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
-        bIsRunning = false;
         return;
     }
 
-    // Check path completion
+    ElapsedTime += DeltaSeconds;
+
+    // ======== TIMEOUT ========
+    if (ElapsedTime >= PlanningTimeout)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("MAPF Task: Timeout for Agent %d (%.1f sec)"),
+            CurrentAgentID, ElapsedTime);
+
+        UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+        if (BB)
+        {
+            FName TaskStateName = GetKeyName(TaskState);
+            if (!TaskStateName.IsNone())
+            {
+                //BB->SetValueAsEnum(TaskStateName, 3); // Failed
+            }
+        }
+
+        bIsRunning = false;
+        FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+        return;
+    }
+
+    // ======== ПРОВЕРКА КОМПОНЕНТОВ ========
     AAIController* AIController = OwnerComp.GetAIOwner();
-    if (!AIController) return;
+    if (!AIController)
+    {
+        bIsRunning = false;
+        FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+        return;
+    }
 
     APawn* Pawn = AIController->GetPawn();
-    if (!Pawn) return;
+    if (!Pawn)
+    {
+        bIsRunning = false;
+        FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+        return;
+    }
 
     UPathFollowerComponent* Follower = Pawn->FindComponentByClass<UPathFollowerComponent>();
-    if (Follower && Follower->IsPathComplete())
+    if (!Follower)
     {
-        UE_LOG(LogTemp, Log, TEXT("BTTask: Path completed for Agent %d"), CurrentAgentID);
-        FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
         bIsRunning = false;
+        FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+        return;
+    }
+
+    // ======== ПРОВЕРКА ЗАВЕРШЕНИЯ ПУТИ ========
+    if (Follower->bFinished)
+    {
+        UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+        if (BB)
+        {
+            FName TaskStateName = GetKeyName(TaskState);
+
+            UE_LOG(LogTemp, Warning, TEXT("=== BEFORE WRITE ==="));
+            UE_LOG(LogTemp, Warning, TEXT("TaskState key name: '%s'"), *TaskStateName.ToString());
+            UE_LOG(LogTemp, Warning, TEXT("TaskState key is None: %d"), TaskStateName.IsNone());
+            UE_LOG(LogTemp, Warning, TEXT("NextState value: %d"), static_cast<uint8>(NextState));
+
+            // Прочитать текущее значение
+            uint8 OldValue = BB->GetValueAsEnum(TaskStateName);
+            UE_LOG(LogTemp, Warning, TEXT("Current TaskState value: %d"), OldValue);
+
+            // Записать новое значение
+            BB->SetValueAsEnum(TaskStateName, static_cast<uint8>(NextState));
+
+            // Проверить что записалось
+            uint8 NewValue = BB->GetValueAsEnum(TaskStateName);
+            UE_LOG(LogTemp, Warning, TEXT("=== AFTER WRITE ==="));
+            UE_LOG(LogTemp, Warning, TEXT("New TaskState value: %d"), NewValue);
+            UE_LOG(LogTemp, Warning, TEXT("Write %s"), (NewValue == static_cast<uint8>(NextState)) ? TEXT("SUCCESS") : TEXT("FAILED"));
+
+            // Очистить цель
+            //FName GoalKeyName = GetKeyName(GoalLocationKey);
+            //BB->ClearValue(GoalKeyName);
+        }
+
+        UE_LOG(LogTemp, Log, TEXT("MAPF Task: Path completed for Agent %d, TaskState=%d"),
+            CurrentAgentID, static_cast<uint8>(NextState));
+
+        bIsRunning = false;
+        FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+        return;
     }
 }

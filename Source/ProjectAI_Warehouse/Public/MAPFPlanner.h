@@ -76,6 +76,22 @@ class PROJECTAI_WAREHOUSE_API UMAPFPlanner : public UGameInstanceSubsystem
     GENERATED_BODY()
 
 public:
+    UFUNCTION(BlueprintCallable, Category = "MAPF|Debug")
+    void DrawReservations(float Duration = 0.5f);
+
+    UFUNCTION(BlueprintCallable, Category = "MAPF|Debug")
+    void ToggleReservationVisualization();
+
+    UPROPERTY(EditAnywhere, Category = "MAPF|Debug")
+    bool bShowReservations = false;
+
+    UPROPERTY(EditAnywhere, Category = "MAPF|Debug")
+    FColor ReservationColor = FColor::Orange;
+
+    UPROPERTY(EditAnywhere, Category = "MAPF|Debug")
+    float ReservationSphereRadius = 20.0f;
+
+
     // === CONFIGURATION ===
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPF Config|Grid", meta = (ClampMin = "0.5", ClampMax = "5.0"))
     float CellSizeMeters = 1.0f;
@@ -102,8 +118,8 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPF Config|Planning", meta = (ClampMin = "1000"))
     int32 MaxSearchNodes = 50000;  // Increased
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPF Config|Planning", meta = (ClampMin = "0", ClampMax = "2"))
-    int32 AgentClearance = 1;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPF Config|Planning", meta = (ClampMin = "0", ClampMax = "5"))
+    int32 AgentClearance = 3;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPF Config|Planning")
     bool bUseLineTraceForObstacles = true;
@@ -159,6 +175,12 @@ public:
     UFUNCTION(BlueprintCallable, Category = "MAPF|Debug")
     void DebugPrintReservations() const;
 
+    UFUNCTION(BlueprintCallable, Category = "MAPF|Debug")
+    bool IsBlockingNarrowPath(const FIntVector& Loc, int32 AgentID) const;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPF Config|Cooperative")
+    float ObstacleAvoidanceWeight = 2.0f;
+
 private:
     uint64 PackKey(int32 X, int32 Y, int32 T) const;
     void UnpackKey(uint64 Key, int32& OutX, int32& OutY, int32& OutT) const;
@@ -171,4 +193,12 @@ private:
     bool IsWithinGridBounds(const FIntVector& GridPos) const;
     float CalculateConflictPenalty(const FIntVector& Loc, int32 AgentID, float Priority) const;
     void CleanupStaleReservations(float CurrentTime);
+    bool CheckDiagonalCrossing(const FIntVector& FromA, const FIntVector& ToA, 
+                               const FIntVector& FromB, const FIntVector& ToB, int32 T) const;
+    FTimerHandle VisualizationTimer;
+
+    void StartVisualizationTimer();
+    void StopVisualizationTimer();
+
+    void DrawReservationsWrapper();
 };
